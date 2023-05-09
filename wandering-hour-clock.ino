@@ -219,7 +219,8 @@ void loop() {
 void handleRoot() {
   String html = "<html><head>";
   html += "<title>Wandering Hour Clock</title>";
-  html += "</head><body><h2>Set Time</h2><form method='POST' action='/submit'>";
+  html += "</head><body><h2>Set Time</h2><h3>Set the time you see on the clock now. Click submit to adjust the dial to current time automatically</h3>";
+  html += "<form method='POST' action='/submit'>";
   html += "<label for='hour'>Hour (1-12):</label><input type='number' id='hour' name='hour' min='1' max='12' required><br>";
   html += "<label for='minute61813414'>Minute (0-59):</label><input type='number' id='minute' name='minute' min='0' max='59' required><br>";
   html += "<button type='submit'>Set Time</button></form>";
