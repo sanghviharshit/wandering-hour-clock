@@ -6,8 +6,9 @@ An improved version of 3D printed [wandering hour clock](https://www.printables.
 
 ### Hardware
 - Ikea Bondis clock
-- 3D printed parts and additional hardware listed from [Printables](https://www.printables.com/model/327198-improved-wandering-hour-clock), except ClockMovementGear
+- 3D printed parts and additional hardware listed from [Printables](https://www.printables.com/model/327198-improved-wandering-hour-clock), except ClockMovementGear and Standoffs
 - 3D printed ClockMovementGear from [Printables](https://www.printables.com/model/429804-wandering-hour-clock-with-stepper-motor)
+- Standoffs from [Printables](https://www.printables.com/model/476980-wandering-hour-clock-w-arduino-wifi-stepper-motor-)
 - Any ESP board with wifi. e.g. ESP32, ESP8266
 - 28BYJ-48 unipolar stepper motor
 - ULN2003 motor driver
@@ -30,7 +31,8 @@ An improved version of 3D printed [wandering hour clock](https://www.printables.
 
 (Image Credit: https://www.printables.com/model/327198-improved-wandering-hour-clock)
 ### Clock
-TBD
+![Front](images/clock_front.jpg)
+![Back](images/clock_back.jpg)
 
 ### Web Server
 ![Web Server](images/web_server.png)
