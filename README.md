@@ -35,4 +35,4 @@ An improved version of 3D printed [wandering hour clock](https://www.printables.
 ![Back](images/clock_back.jpg)
 
 ### Web Server
-![Web Server](images/web_server.png)
+![Web Server](images/web_server.jpeg)

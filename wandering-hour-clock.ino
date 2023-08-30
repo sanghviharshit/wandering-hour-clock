@@ -50,6 +50,8 @@ Stepper myStepper(stepsPerRev, IN1, IN3, IN2, IN4);
 // initialize UDP library
 WiFiUDP udp;
 unsigned int localPort = 8888;  // local port to listen for UDP packets
+int retryCount = 0;             // Wifi connection retry count
+const int maxRetryCount = 10;  // Maximum number of retry attempts
 
 // Define the NTP server and timezone offset
 static const char ntpServerName[] = "us.pool.ntp.org";
@@ -62,23 +64,31 @@ time_t getNtpMinute();
 void sendNTPpacket(IPAddress &address);
 void handleDialAdjustments(int, int);
 
+
+void setupWiFi() {
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+  
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(1000);
+    Serial.println("Connecting to WiFi...");
+    retryCount++;
+    if (retryCount >= maxRetryCount) {
+      Serial.println("Failed to connect to WiFi. Restarting...");
+      ESP.restart();  // If maximum retry count is reached, restart the board
+    }
+  }
+  retryCount = 0;  // Reset retry count on successful connection
+  Serial.println("Connected to WiFi");
+  Serial.println("IP address: " + WiFi.localIP().toString());
+}
+
 void setup() {
   Serial.begin(115200);
   Serial.println("Booting");
 
-  //  Connect to WiFi
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid, password);
-  while (WiFi.waitForConnectResult() != WL_CONNECTED) {
-    Serial.println("Connection Failed! Rebooting...");
-    delay(5000);
-    ESP.restart();
-  }
-
-  Serial.println("Ready");
-  Serial.print("IP address: ");
-  Serial.println(WiFi.localIP());
-
+  // Setup Wi-Fi connection
+  setupWiFi();
 
   // Initialize the NTP client and sync with the NTP server
   udp.begin(localPort);
@@ -135,7 +145,6 @@ void setup() {
 
   server.begin(); // Start the server
 
-
   pinMode(led, OUTPUT);
 
   myStepper.setSpeed(maxSpeed);
@@ -149,7 +158,6 @@ void setup() {
 
   // Start up cycle
   handleFormRecycle();
-
 }
 
 
@@ -159,6 +167,12 @@ void loop() {
 
   // Handle incoming client requests
   server.handleClient();
+
+  // Check Wi-Fi connection and reconnect if necessary
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("Wi-Fi disconnected. Reconnecting...");
+    setupWiFi();
+  }
 
   // Get the current time in seconds since January 1, 1970 (Unix time)
   time_t currentTime = now();
