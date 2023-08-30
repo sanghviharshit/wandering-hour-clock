@@ -147,6 +147,9 @@ void setup() {
   cMinute = pMinute = localTime.tm_min;
   cHour = pHour = localTime.tm_hour % 12;
 
+  // Start up cycle
+  handleFormRecycle();
+
 }
 
 
@@ -219,7 +222,51 @@ void loop() {
 void handleRoot() {
   String html = "<html><head>";
   html += "<title>Wandering Hour Clock</title>";
-  html += "</head><body><h2>Set Time</h2><h3>Set the time you see on the clock now. Click submit to adjust the dial to current time automatically</h3>";
+  html += "  <meta name='viewport' content='width=device-width, initial-scale=1'>";
+  html += "  <style>";
+  html += "    body {";
+  html += "      font-family: Arial, Helvetica, sans-serif;";
+  html += "    }";
+  html += "";
+  html += "    .container {";
+  html += "      width: 100%;";
+  html += "      max-width: 400px;";
+  html += "      margin: 0 auto;";
+  html += "      padding: 20px;";
+  html += "    }";
+  html += "";
+  html += "    label {";
+  html += "      display: block;";
+  html += "      margin-bottom: 10px;";
+  html += "    }";
+  html += "";
+  html += "    input[type='number'] {";
+  html += "      width: 100%;";
+  html += "      padding: 10px;";
+  html += "      margin-bottom: 20px;";
+  html += "      border: 1px solid #ccc;";
+  html += "      border-radius: 4px;";
+  html += "      box-sizing: border-box;";
+  html += "    }";
+  html += "";
+  html += "    button {";
+  html += "      background-color: #4CAF50;";
+  html += "      color: white;";
+  html += "      padding: 10px 20px;";
+  html += "      border: none;";
+  html += "      border-radius: 4px;";
+  html += "      cursor: pointer;";
+  html += "      width: 100%;";
+  html += "    }";
+  html += "";
+  html += "    button:hover {";
+  html += "      background-color: #45a049;";
+  html += "    }";
+  html += "  </style>";
+  html += "</head><body>";
+  html += "<div class='container'>";
+  html += "<h2>Set Time</h2>";
+  html += "<h3>Set the time you see on the clock now. Click submit to adjust the dial to current time automatically</h3>";
   html += "<form method='POST' action='/submit'>";
   html += "<label for='hour'>Hour (1-12):</label><input type='number' id='hour' name='hour' min='1' max='12' required><br>";
   html += "<label for='minute61813414'>Minute (0-59):</label><input type='number' id='minute' name='minute' min='0' max='59' required><br>";
