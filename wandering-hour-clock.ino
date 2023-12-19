@@ -24,6 +24,7 @@
 // Replace the ssid and password in secrets.h
 const char* ssid = SECRET_SSID;
 const char* password = SECRET_PASSWORD;
+static const char hostname[] = "wander";
 
 const int stepsPerRev = 2048; /* steps / rev for stepper motor */
 const int maxSpeed = 8;   /* max speed stepper RPM, conservative */
@@ -66,9 +67,29 @@ void handleDialAdjustments(int, int);
 
 
 void setupWiFi() {
+  // For arduino-esp32 V2.0.14, calling setHostname(...) followed by
+  // config(...) and prior to both mode() and begin() will correctly
+  // set the hostname.
+
+  // The above ordering shouldn't really be required; in an ideal
+  // world, calling setHostname() any time before begin() should be ok.
+  // I am hopeful this will be true in the future.  But in any case,
+  // this is what works for me now.
+
+  // Note that calling getHostname() isn't a reliable way to verify
+  // the hostname, because getHostname() reads the current internal
+  // variable, which may NOT have been the name sent in the actual
+  // DHCP request. Thus the result from getHostname() may be out of
+  // sync with the DHCP server.
+
+  // For a little more info, please see:
+  // https://github.com/tzapu/WiFiManager/issues/1403
+
+  WiFi.setHostname(hostname);
+  WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE, INADDR_NONE);
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
-  
+
   while (WiFi.status() != WL_CONNECTED) {
     delay(1000);
     Serial.println("Connecting to WiFi...");
@@ -103,9 +124,6 @@ void setup() {
   }
 
   // Set up Arduino OTA
-
-  // Hostname defaults to esp3232-[MAC]
-  ArduinoOTA.setHostname("wandering-hour-clock");
 
   ArduinoOTA
     .onStart([]() {
@@ -292,6 +310,7 @@ void handleRoot() {
   html += "<h2>Debug Info</h2>";
   html += "<div>cHour: cMinute = " + String(cHour) + ":" + String(cMinute) + "</div>";
   html += "<br/><div>pHour: pMinute = " + String(pHour) + ":" + String(pMinute) + "</div>";
+  html += "<br/><div>hostname = " + String(hostname) + "</div>";
 
   server.send(200, "text/html", html);
 }
