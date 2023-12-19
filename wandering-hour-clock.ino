@@ -58,8 +58,10 @@ const int maxRetryCount = 10;  // Maximum number of retry attempts
 static const char ntpServerName[] = "us.pool.ntp.org";
 //static const char ntpServerName[] = "time.nist.gov";
 
-//const long timeZoneOffset = -8;  // Pacific Standard Time (PST)
-const long timeZoneOffset = -7;  // Pacific DaylightTime (PDT)
+// Pacific Standard Time as a default
+const long timeZoneOffsetHours = -8;
+const long timeZoneOffsetMins = 0;
+const bool isDst = false;
 
 time_t getNtpMinute();
 void sendNTPpacket(IPAddress &address);
@@ -307,9 +309,12 @@ void handleRoot() {
   html += "<form method='POST' action='/backward-5'><button type='submit'>-5m</button></form></body></html>";
   html += "<form method='POST' action='/recycle'><button type='submit'>Recycle</button></form></body></html>";
   html += "<form method='POST' action='/demo'><button type='submit'>Demo</button></form></body></html>";
+
   html += "<h2>Debug Info</h2>";
-  html += "<div>cHour: cMinute = " + String(cHour) + ":" + String(cMinute) + "</div>";
-  html += "<br/><div>pHour: pMinute = " + String(pHour) + ":" + String(pMinute) + "</div>";
+  html += "<div>cHour: cMinute = " + String(cHour) + ":" + (cMinute < 10 ? "0" : "") + String(cMinute) + "</div>";
+  html += "<br/><div>pHour: pMinute = " + String(pHour) + ":" + (cMinute < 10 ? "0" : "") + String(pMinute) + "</div>";
+  html += "<br/><div>timeZoneOffsetHours : timeZoneOffsetMins = " + String(timeZoneOffsetHours) + ":" + (timeZoneOffsetMins < 10 ? "0" : "") + String(timeZoneOffsetMins) + "</div>";
+  html += "<br/><div>isDst = " + String(isDst ? "true" : "false") + "</div>";
   html += "<br/><div>hostname = " + String(hostname) + "</div>";
 
   server.send(200, "text/html", html);
@@ -464,7 +469,15 @@ time_t getNtpMinute()
       secsSince1900 |= (unsigned long)packetBuffer[41] << 16;
       secsSince1900 |= (unsigned long)packetBuffer[42] << 8;
       secsSince1900 |= (unsigned long)packetBuffer[43];
-      return secsSince1900 - 2208988800UL + timeZoneOffset * SECS_PER_HOUR;
+
+      // Adjust from UTC to local time zone
+      unsigned long secs = secsSince1900 - 2208988800UL;
+      secs += timeZoneOffsetHours * SECS_PER_HOUR;
+      secs += (timeZoneOffsetHours < 0 ? -timeZoneOffsetMins : timeZoneOffsetMins) * SECS_PER_MIN;
+      secs += (isDst ? SECS_PER_HOUR : 0);
+
+      return secs;
+
     }
   }
   Serial.println("No NTP Response :-(");
