@@ -39,6 +39,7 @@ An improved version of 3D printed [wandering hour clock](https://www.printables.
 
 ### Preferences
 ![Preferences](images/set_preferences.png)
-Look up your standard time [UTC offset](https://en.wikipedia.org/wiki/List_of_UTC_offsets) and enter the value. If it is currently daylight saving time where you are, check the appropriate box. For example, in Newfoundland  (UTC-3:30) during the summer, the hour offset would be "-3", the minute offset would be "30" and the daylight saving time box should be checked.
+
+Look up your [UTC offset](https://en.wikipedia.org/wiki/List_of_UTC_offsets) for standard time, and enter the value. If it is currently daylight saving time where you are, check the appropriate box. For example, in Newfoundland  (UTC-3:30) during the summer, the hour offset would be "-3", the minute offset would be "30" and the daylight saving time box should be checked.
 
 The preference values are saved in non-volatile memory and will be retained after a power cycle. After making a change to the time zone, you will need to resynchronize the clock by using the web server to set the correct time.
