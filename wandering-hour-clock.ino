@@ -28,9 +28,10 @@ const char* ssid = SECRET_SSID;
 const char* password = SECRET_PASSWORD;
 
 // Hostname
-const char* hostname = "wander";
+const char* hostname = "wandering-hour-clock";
 
-// Preferences library namespace and keys
+// Preferences library namespace and keys. The library
+// limits the namespace and attrib length to 16 characters max.
 const char* pref_namespace = "whc"; // "Wandering Hour Clock"
 const char* attrib_tzhours = "tzhours";
 const char* attrib_tzmins = "tzmins";
