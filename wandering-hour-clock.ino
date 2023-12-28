@@ -17,13 +17,25 @@
 #include <ArduinoOTA.h>
 #include <TimeLib.h>  // https://github.com/PaulStoffregen/Time
 #include <WebServer.h>
+#include <Preferences.h>
 
 #include <Stepper.h>
+
 #include "secrets.h"
 
 // Replace the ssid and password in secrets.h
 const char* ssid = SECRET_SSID;
 const char* password = SECRET_PASSWORD;
+
+// Hostname
+const char* hostname = "wandering-hour-clock";
+
+// Preferences library namespace and keys. The library
+// limits the namespace and attrib length to 16 characters max.
+const char* pref_namespace = "whc"; // "Wandering Hour Clock"
+const char* attrib_tzhours = "tzhours";
+const char* attrib_tzmins = "tzmins";
+const char* attrib_isdst = "isdst";
 
 const int stepsPerRev = 2048; /* steps / rev for stepper motor */
 const int maxSpeed = 8;   /* max speed stepper RPM, conservative */
@@ -47,6 +59,8 @@ WebServer server(80); // Create a WebServer object that listens on port 80
 // initialize the stepper library
 Stepper myStepper(stepsPerRev, IN1, IN3, IN2, IN4);
 
+Preferences preferences;
+
 // initialize UDP library
 WiFiUDP udp;
 unsigned int localPort = 8888;  // local port to listen for UDP packets
@@ -57,8 +71,9 @@ const int maxRetryCount = 10;  // Maximum number of retry attempts
 static const char ntpServerName[] = "us.pool.ntp.org";
 //static const char ntpServerName[] = "time.nist.gov";
 
-//const long timeZoneOffset = -8;  // Pacific Standard Time (PST)
-const long timeZoneOffset = -7;  // Pacific DaylightTime (PDT)
+long timeZoneOffsetHours = 0;
+long timeZoneOffsetMins = 0;
+bool isDst = false;
 
 time_t getNtpMinute();
 void sendNTPpacket(IPAddress &address);
@@ -66,9 +81,29 @@ void handleDialAdjustments(int, int);
 
 
 void setupWiFi() {
+  // For arduino-esp32 V2.0.14, calling setHostname(...) followed by
+  // config(...) and prior to both mode() and begin() will correctly
+  // set the hostname.
+
+  // The above ordering shouldn't really be required; in an ideal
+  // world, calling setHostname() any time before begin() should be ok.
+  // I am hopeful this will be true in the future.  But in any case,
+  // this is what works for me now.
+
+  // Note that calling getHostname() isn't a reliable way to verify
+  // the hostname, because getHostname() reads the current internal
+  // variable, which may NOT have been the name sent in the actual
+  // DHCP request. Thus the result from getHostname() may be out of
+  // sync with the DHCP server.
+
+  // For a little more info, please see:
+  // https://github.com/tzapu/WiFiManager/issues/1403
+
+  WiFi.setHostname(hostname);
+  WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE, INADDR_NONE);
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
-  
+
   while (WiFi.status() != WL_CONNECTED) {
     delay(1000);
     Serial.println("Connecting to WiFi...");
@@ -83,12 +118,26 @@ void setupWiFi() {
   Serial.println("IP address: " + WiFi.localIP().toString());
 }
 
+void setupTz() {
+  preferences.begin(pref_namespace, true); // Readonly mode
+
+  // Default to UTC
+  timeZoneOffsetHours = preferences.getLong(attrib_tzhours, 0);
+  timeZoneOffsetMins = preferences.getLong(attrib_tzmins, 0);
+  isDst = preferences.getBool(attrib_isdst, false);
+
+  preferences.end();
+}
+
 void setup() {
   Serial.begin(115200);
   Serial.println("Booting");
 
   // Setup Wi-Fi connection
   setupWiFi();
+
+  // Setup time zone variables
+  setupTz();
 
   // Initialize the NTP client and sync with the NTP server
   udp.begin(localPort);
@@ -103,9 +152,6 @@ void setup() {
   }
 
   // Set up Arduino OTA
-
-  // Hostname defaults to esp3232-[MAC]
-  ArduinoOTA.setHostname("wandering-hour-clock");
 
   ArduinoOTA
     .onStart([]() {
@@ -142,6 +188,7 @@ void setup() {
   server.on("/backward-5", HTTP_POST, handleFormBackward5);
   server.on("/recycle", HTTP_POST, handleFormRecycle);
   server.on("/demo", HTTP_POST, handleFormDemo);
+  server.on("/set-preferences", HTTP_POST, handleFormSetPreferences);
 
   server.begin(); // Start the server
 
@@ -289,9 +336,20 @@ void handleRoot() {
   html += "<form method='POST' action='/backward-5'><button type='submit'>-5m</button></form></body></html>";
   html += "<form method='POST' action='/recycle'><button type='submit'>Recycle</button></form></body></html>";
   html += "<form method='POST' action='/demo'><button type='submit'>Demo</button></form></body></html>";
+
+  html += "<h2>Preferences</h2>";
+  html += "<form method='POST' action='/set-preferences'>";
+  html += "<label for='TZ hour offset'>TZ hour offset:</label><input type='number' id='hour_offset' name='hour_offset' min='-14' max='12' value='" + String(timeZoneOffsetHours) + "' required><br>";
+  html += "<label for='TZ minute offset'>TZ minute offset:</label><input type='number' id='minute_offset' name='minute_offset' min='0' max='59' value='" + String(timeZoneOffsetMins) + "' required><br>";
+  html += "<label for='DST'>Daylight Savings Time currently in effect?</label><input type='checkbox' id='dst' name='dst'" + String( isDst ? "checked" : "") + "><br>";
+  html += "<button type='submit'>Save preferences</button></form>";
+
   html += "<h2>Debug Info</h2>";
-  html += "<div>cHour: cMinute = " + String(cHour) + ":" + String(cMinute) + "</div>";
-  html += "<br/><div>pHour: pMinute = " + String(pHour) + ":" + String(pMinute) + "</div>";
+  html += "<div>cHour: cMinute = " + String(cHour) + ":" + (cMinute < 10 ? "0" : "") + String(cMinute) + "</div>";
+  html += "<br/><div>pHour: pMinute = " + String(pHour) + ":" + (pMinute < 10 ? "0" : "") + String(pMinute) + "</div>";
+  html += "<br/><div>timeZoneOffsetHours : timeZoneOffsetMins = " + String(timeZoneOffsetHours) + ":" + (timeZoneOffsetMins < 10 ? "0" : "") + String(timeZoneOffsetMins) + "</div>";
+  html += "<br/><div>isDst = " + String(isDst ? "true" : "false") + "</div>";
+  html += "<br/><div>hostname = " + String(hostname) + "</div>";
 
   server.send(200, "text/html", html);
 }
@@ -386,6 +444,43 @@ void handleDialAdjustments(int iHour, int iMinute) {
 
 }
 
+void handleFormSetPreferences() {
+  if (server.hasArg("hour_offset") && server.hasArg("minute_offset")) {
+    int tmp_hour_offset = server.arg("hour_offset").toInt();
+    int tmp_minute_offset = server.arg("minute_offset").toInt();
+    bool tmp_dst = server.hasArg("dst");
+
+    if (tmp_hour_offset >= -14 && tmp_hour_offset <= 12 && tmp_minute_offset >= 0 && tmp_minute_offset <= 59) {
+      Serial.print("Setting hour offset: ");
+      Serial.println(tmp_hour_offset);
+      Serial.print("Setting minute offset: ");
+      Serial.println(tmp_minute_offset);
+      Serial.print("Setting DST: ");
+      Serial.println(tmp_dst ? "true" : "false");
+
+      preferences.begin(pref_namespace, false); // read/write mode
+      preferences.putLong(attrib_tzhours, tmp_hour_offset);
+      preferences.putLong(attrib_tzmins, tmp_minute_offset);
+      preferences.putBool(attrib_isdst, tmp_dst);
+      preferences.end();
+
+      // reread and sync the global variables with the preferences values
+      setupTz();
+
+      // force a time sync now
+      setTime(getNtpMinute());
+
+      // Return a success message to the client
+      server.send(200, "text/plain", "Preferences set successfully");
+
+    } else {
+      server.send(400, "text/plain", "Invalid values");
+    }
+  } else {
+    server.send(400, "text/plain", "Missing fields");
+  }
+}
+
 void handleFormSubmit() {
   // Check if the form was submitted
   if (server.hasArg("hour") && server.hasArg("minute")) {
@@ -445,7 +540,15 @@ time_t getNtpMinute()
       secsSince1900 |= (unsigned long)packetBuffer[41] << 16;
       secsSince1900 |= (unsigned long)packetBuffer[42] << 8;
       secsSince1900 |= (unsigned long)packetBuffer[43];
-      return secsSince1900 - 2208988800UL + timeZoneOffset * SECS_PER_HOUR;
+
+      // Adjust from UTC to local time zone
+      unsigned long secs = secsSince1900 - 2208988800UL;
+      secs += timeZoneOffsetHours * SECS_PER_HOUR;
+      secs += (timeZoneOffsetHours < 0 ? -timeZoneOffsetMins : timeZoneOffsetMins) * SECS_PER_MIN;
+      secs += (isDst ? SECS_PER_HOUR : 0);
+
+      return secs;
+
     }
   }
   Serial.println("No NTP Response :-(");
