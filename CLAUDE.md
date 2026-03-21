@@ -67,11 +67,11 @@ Never commit `secrets.h`. It is excluded via `.gitignore`.
 ### Entry Points
 
 - **`setup()`** — Runs once on boot:
-  1. Connects to WiFi (`setupWiFi()`)
+  1. Attempts WiFi (`setupWiFi()`) — continues without it on failure
   2. Loads timezone preferences from non-volatile storage (`setupTz()`)
-  3. Initializes NTP time sync via UDP (syncs every 300 seconds)
-  4. Configures ArduinoOTA
-  5. Registers all HTTP route handlers and starts web server
+  3. Initializes NTP time sync via UDP (syncs every 300 seconds); waits up to 30s for first sync if WiFi is available
+  4. If WiFi available: configures ArduinoOTA and starts mDNS (`startNetworkServices()`)
+  5. Registers all HTTP route handlers and starts web server (always, regardless of WiFi)
   6. Sets stepper speed, records initial time, runs recycle cycle
 
 - **`loop()`** — Runs continuously:
@@ -152,10 +152,22 @@ secs += (timeZoneOffsetHours < 0 ? -timeZoneOffsetMins : timeZoneOffsetMins) * S
 
 ## WiFi Behavior
 
-- Max retry count before ESP restart: 10 (with 1s delays between attempts)
+- `setupWiFi()` returns `bool` — **never calls `ESP.restart()`**. If all retries are exhausted it returns `false` and the clock continues running without network.
+- Max connect attempts at startup: 10 (1s apart), then graceful fallback.
+- `wifiAvailable` global tracks live connectivity for guarding network-dependent calls.
 - Hostname: `"wandering-hour-clock"` (appears in DHCP/mDNS)
-- On disconnect during runtime, `loop()` calls `setupWiFi()` to reconnect
-- **Hostname ordering quirk** (arduino-esp32 v2.0.14): `setHostname()` must be called before `config()`, `mode()`, and `begin()` for DHCP to report the correct name
+- **Hostname ordering quirk** (arduino-esp32 v2.0.14): `setHostname()` must be called before `config()`, `mode()`, and `begin()` for DHCP to report the correct name.
+
+### Offline / Reconnect Flow
+
+| Event | Behavior |
+|---|---|
+| WiFi unavailable at boot | Skip NTP wait, OTA, mDNS. Motor runs; no accurate time until reconnect. |
+| NTP unavailable at boot (WiFi up) | 30-second timeout, then continues. TimeLib retries every 300 s. |
+| WiFi drops at runtime | `wifiAvailable` set to `false`; non-blocking `WiFi.begin()` attempted every 30 s via `loop()`. |
+| WiFi reconnects | `startNetworkServices()` called (OTA + mDNS restarted), NTP synced immediately. |
+
+**`loop()` reconnect is non-blocking.** It calls `WiFi.begin()` and returns immediately; the association completes in the background. No 10-second blocking delay in the main loop.
 
 ---
 
@@ -250,4 +262,4 @@ Key points:
 - **Single-threaded:** The main loop handles OTA, web server, WiFi, and motor updates sequentially. Long motor operations (demo, recycle) block all other processing.
 - **Forward/Backward adjustment quirk:** These handlers always do a full recycle first (CCW+CW), then apply the step offset. This works because the wandering hour mechanism relies on a physical reset position.
 - **No SPIFFS/filesystem:** No files stored on flash; HTML is generated in-memory.
-- **ESP.restart() on WiFi failure:** If WiFi cannot connect in 10 attempts at startup, the board hard-restarts.
+- **No accurate time without NTP:** If WiFi/NTP is unavailable at boot the clock runs the motor cycle but has no notion of actual time. The stepper still advances correctly once `timeStatus()` transitions out of `timeNotSet`.

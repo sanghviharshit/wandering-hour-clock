@@ -62,8 +62,11 @@ Preferences preferences;
 // initialize UDP library
 WiFiUDP udp;
 unsigned int localPort = 8888;  // local port to listen for UDP packets
-int retryCount = 0;             // Wifi connection retry count
-const int maxRetryCount = 10;  // Maximum number of retry attempts
+const int maxRetryCount = 10;   // WiFi connection attempts before giving up
+
+bool wifiAvailable = false;
+unsigned long lastReconnectAttempt = 0;
+const unsigned long reconnectInterval = 30000; // ms between reconnect attempts in loop()
 
 // Define the NTP server and timezone offset
 static const char ntpServerName[] = "us.pool.ntp.org";
@@ -79,42 +82,31 @@ void handleDialAdjustments(int, int);
 void runRecycleCycle();
 
 
-void setupWiFi() {
-  // For arduino-esp32 V2.0.14, calling setHostname(...) followed by
-  // config(...) and prior to both mode() and begin() will correctly
-  // set the hostname.
-
-  // The above ordering shouldn't really be required; in an ideal
-  // world, calling setHostname() any time before begin() should be ok.
-  // I am hopeful this will be true in the future.  But in any case,
-  // this is what works for me now.
-
-  // Note that calling getHostname() isn't a reliable way to verify
-  // the hostname, because getHostname() reads the current internal
-  // variable, which may NOT have been the name sent in the actual
-  // DHCP request. Thus the result from getHostname() may be out of
-  // sync with the DHCP server.
-
-  // For a little more info, please see:
-  // https://github.com/tzapu/WiFiManager/issues/1403
-
+// Attempt to connect to WiFi. Returns true on success, false if all retries
+// are exhausted. Never restarts the board — the clock can run without WiFi
+// and will keep retrying in loop().
+//
+// Hostname ordering note (arduino-esp32 v2.0.14): setHostname() must be
+// called before config(), mode(), and begin() for DHCP to report the right
+// name. See https://github.com/tzapu/WiFiManager/issues/1403
+bool setupWiFi() {
   WiFi.setHostname(hostname);
   WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE, INADDR_NONE);
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
 
-  while (WiFi.status() != WL_CONNECTED) {
+  for (int retries = 0; retries < maxRetryCount; retries++) {
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.println("Connected to WiFi");
+      Serial.println("IP address: " + WiFi.localIP().toString());
+      return true;
+    }
     delay(1000);
     Serial.println("Connecting to WiFi...");
-    retryCount++;
-    if (retryCount >= maxRetryCount) {
-      Serial.println("Failed to connect to WiFi. Restarting...");
-      ESP.restart();  // If maximum retry count is reached, restart the board
-    }
   }
-  retryCount = 0;  // Reset retry count on successful connection
-  Serial.println("Connected to WiFi");
-  Serial.println("IP address: " + WiFi.localIP().toString());
+
+  Serial.println("Failed to connect to WiFi. Continuing without WiFi.");
+  return false;
 }
 
 void setupTz() {
@@ -128,30 +120,9 @@ void setupTz() {
   preferences.end();
 }
 
-void setup() {
-  Serial.begin(115200);
-  Serial.println("Booting");
-
-  // Setup Wi-Fi connection
-  setupWiFi();
-
-  // Setup time zone variables
-  setupTz();
-
-  // Initialize the NTP client and sync with the NTP server
-  udp.begin(localPort);
-  Serial.print("NTP UDP Local port: ");
-  Serial.println(localPort);
-
-  Serial.println("waiting for sync");
-  setSyncProvider(getNtpMinute);
-  setSyncInterval(300);
-  while (timeStatus() == timeNotSet) {
-    delay(5000);
-  }
-
-  // Set up Arduino OTA
-
+// Start network-dependent services (OTA, mDNS). Called once WiFi is
+// available — either at boot or when the connection is first established.
+void startNetworkServices() {
   ArduinoOTA
     .onStart([]() {
       String type;
@@ -159,7 +130,6 @@ void setup() {
         type = "sketch";
       else // U_SPIFFS
         type = "filesystem";
-
       // NOTE: if updating SPIFFS this would be the place to unmount SPIFFS using SPIFFS.end()
       Serial.println("Start updating " + type);
     })
@@ -177,17 +147,53 @@ void setup() {
       else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
       else if (error == OTA_END_ERROR) Serial.println("End Failed");
     });
-
   ArduinoOTA.begin();
 
-  // Start mDNS responder so the device is reachable at wandering-hour-clock.local
   if (MDNS.begin(hostname)) {
     Serial.println("mDNS responder started");
   } else {
     Serial.println("Error setting up mDNS responder!");
   }
+}
 
-  // Set up the web server
+void setup() {
+  Serial.begin(115200);
+  Serial.println("Booting");
+
+  // Attempt WiFi — the clock continues without it if unavailable
+  wifiAvailable = setupWiFi();
+
+  // Load timezone from non-volatile storage (works without WiFi)
+  setupTz();
+
+  // Register NTP sync provider. getNtpMinute() returns 0 if WiFi/NTP is
+  // unavailable, so TimeLib retries safely every 300 s.
+  udp.begin(localPort);
+  Serial.print("NTP UDP local port: ");
+  Serial.println(localPort);
+  setSyncProvider(getNtpMinute);
+  setSyncInterval(300);
+
+  if (wifiAvailable) {
+    // Wait up to 30 seconds for initial NTP sync
+    Serial.println("Waiting for NTP sync...");
+    unsigned long ntpDeadline = millis() + 30000;
+    while (timeStatus() == timeNotSet && millis() < ntpDeadline) {
+      delay(5000);
+    }
+    if (timeStatus() == timeNotSet) {
+      Serial.println("NTP sync timed out. Clock will sync when reachable.");
+    } else {
+      Serial.println("NTP sync successful.");
+    }
+
+    startNetworkServices();
+  } else {
+    Serial.println("No WiFi — skipping NTP sync, OTA and mDNS at boot.");
+    Serial.println("The clock will sync once WiFi becomes available.");
+  }
+
+  // Web server is always started; it becomes reachable once WiFi is up
   server.on("/", HTTP_GET, handleRoot);
   server.on("/submit", HTTP_POST, handleFormSubmit);
   server.on("/forward-5", HTTP_POST, handleFormForward5);
@@ -195,15 +201,12 @@ void setup() {
   server.on("/recycle", HTTP_POST, handleFormRecycle);
   server.on("/demo", HTTP_POST, handleFormDemo);
   server.on("/set-preferences", HTTP_POST, handleFormSetPreferences);
-
-  server.begin(); // Start the server
+  server.begin();
 
   myStepper.setSpeed(maxSpeed);
 
   time_t currentTime = now();
-  // Convert the Unix time to local time
   tm localTime = *localtime(&currentTime);
-
   cMinute = pMinute = localTime.tm_min;
   cHour = pHour = localTime.tm_hour % 12;
 
@@ -219,10 +222,32 @@ void loop() {
   // Handle incoming client requests
   server.handleClient();
 
-  // Check Wi-Fi connection and reconnect if necessary
+  // WiFi watchdog: non-blocking reconnect with rate limiting.
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("Wi-Fi disconnected. Reconnecting...");
-    setupWiFi();
+    if (wifiAvailable) {
+      // Transition: was connected, just lost it
+      wifiAvailable = false;
+      Serial.println("Wi-Fi disconnected.");
+    }
+    unsigned long now_ms = millis();
+    if (now_ms - lastReconnectAttempt >= reconnectInterval) {
+      lastReconnectAttempt = now_ms;
+      Serial.println("Attempting WiFi reconnect...");
+      // Non-blocking: WiFi.begin() starts the association process in the
+      // background; status is checked on the next loop iteration.
+      WiFi.begin(ssid, password);
+    }
+  } else if (!wifiAvailable) {
+    // Transition: WiFi just became available (first connect or reconnect)
+    wifiAvailable = true;
+    Serial.println("WiFi (re)connected. IP: " + WiFi.localIP().toString());
+    startNetworkServices();
+    // Trigger an immediate NTP sync
+    time_t ntpTime = getNtpMinute();
+    if (ntpTime > 0) {
+      setTime(ntpTime);
+      Serial.println("NTP sync complete after reconnect.");
+    }
   }
 
   // Get the current time in seconds since January 1, 1970 (Unix time)
@@ -457,11 +482,18 @@ void handleFormSetPreferences() {
       preferences.putBool(attrib_isdst, tmp_dst);
       preferences.end();
 
-      // reread and sync the global variables with the preferences values
+      // Reread and sync the global variables with the preferences values
       setupTz();
 
-      // force a time sync now
-      setTime(getNtpMinute());
+      // Force an immediate NTP resync to apply the new timezone offset.
+      // Skipped if WiFi is unavailable — TimeLib will sync at the next
+      // scheduled interval once the network is reachable.
+      if (wifiAvailable) {
+        time_t ntpTime = getNtpMinute();
+        if (ntpTime > 0) {
+          setTime(ntpTime);
+        }
+      }
 
       // Return a success message to the client
       server.send(200, "text/plain", "Preferences set successfully");
