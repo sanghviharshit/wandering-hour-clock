@@ -208,11 +208,14 @@ arduino-cli upload --fqbn esp32:esp32:esp32 --port /dev/ttyUSB0 wandering-hour-c
 3. Add a corresponding HTML form button in `handleRoot()`
 4. Handler must call `server.send(statusCode, "text/plain", "message")`
 
+### Motor Reset Helper
+`runRecycleCycle()` is a motor-only function (no HTTP response) that performs a full CCW+CW rotation to reset needle position. It is safe to call from `setup()` and from HTTP handlers. HTTP handlers like `handleFormRecycle()` call `runRecycleCycle()` then send their own response. **Never call `handleFormRecycle()` from `setup()`** — it would attempt `server.send()` with no connected client.
+
 ### Modifying Stepper Behavior
 - `stepsPerRev = 2048` — do not change unless using a different motor
 - `maxSpeed = 8` RPM — keep conservative; higher speeds may miss steps
 - Motor always runs clockwise for time advancement (positive `step()` values)
-- Forward/Backward handlers do a full CCW+CW reset before the actual adjustment to ensure consistent needle positioning
+- Forward/Backward handlers call `runRecycleCycle()` first, then apply the step offset
 
 ### Preferences Changes
 - Always open with `preferences.begin(pref_namespace, false)` for write mode
@@ -225,6 +228,18 @@ There is no automated test suite. Validation is done:
 1. Via Serial monitor output during development
 2. Physically by observing the clock mechanism
 3. Via the web UI debug info section showing `cHour:cMinute` and `pHour:pMinute`
+
+---
+
+## Dial Adjustment Math
+
+`handleDialAdjustments(iHour, iMinute)` accepts the time currently displayed on the clock face (what the user sees) and advances/rewinds the motor to match actual NTP time.
+
+Key points:
+- Form inputs use 1–12 for hours; normalize with `iHour % 12` to get the 0–11 range that `cHour` uses.
+- Convert both actual and input times to total minutes within a 12-hour window (0–719).
+- Use the **shortest-path** normalization: if `|diff| > 360`, subtract or add 720 to choose the shorter direction.
+- Positive result → motor advances; negative → motor rewinds.
 
 ---
 
