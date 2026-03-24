@@ -39,14 +39,12 @@ const char* attrib_isdst = "isdst";
 
 const int stepsPerRev = 2048; /* steps / rev for stepper motor */
 const int maxSpeed = 8;   /* max speed stepper RPM, conservative */
-const int led = 13;   /* built-in led */
 
 #define IN1 19
 #define IN2 18
 #define IN3 5
 #define IN4 17
 
-int stepDelay;      /* minimum delay / step in uSec */
 unsigned int updateIntervalMinutes = 1;
 unsigned long pMinute = 0;
 unsigned long cMinute;
@@ -64,8 +62,11 @@ Preferences preferences;
 // initialize UDP library
 WiFiUDP udp;
 unsigned int localPort = 8888;  // local port to listen for UDP packets
-int retryCount = 0;             // Wifi connection retry count
-const int maxRetryCount = 10;  // Maximum number of retry attempts
+const int maxRetryCount = 10;   // WiFi connection attempts before giving up
+
+bool wifiAvailable = false;
+unsigned long lastReconnectAttempt = 0;
+const unsigned long reconnectInterval = 30000; // ms between reconnect attempts in loop()
 
 // Define the NTP server and timezone offset
 static const char ntpServerName[] = "us.pool.ntp.org";
@@ -78,44 +79,34 @@ bool isDst = false;
 time_t getNtpMinute();
 void sendNTPpacket(IPAddress &address);
 void handleDialAdjustments(int, int);
+void runRecycleCycle();
 
 
-void setupWiFi() {
-  // For arduino-esp32 V2.0.14, calling setHostname(...) followed by
-  // config(...) and prior to both mode() and begin() will correctly
-  // set the hostname.
-
-  // The above ordering shouldn't really be required; in an ideal
-  // world, calling setHostname() any time before begin() should be ok.
-  // I am hopeful this will be true in the future.  But in any case,
-  // this is what works for me now.
-
-  // Note that calling getHostname() isn't a reliable way to verify
-  // the hostname, because getHostname() reads the current internal
-  // variable, which may NOT have been the name sent in the actual
-  // DHCP request. Thus the result from getHostname() may be out of
-  // sync with the DHCP server.
-
-  // For a little more info, please see:
-  // https://github.com/tzapu/WiFiManager/issues/1403
-
+// Attempt to connect to WiFi. Returns true on success, false if all retries
+// are exhausted. Never restarts the board — the clock can run without WiFi
+// and will keep retrying in loop().
+//
+// Hostname ordering note (arduino-esp32 v2.0.14): setHostname() must be
+// called before config(), mode(), and begin() for DHCP to report the right
+// name. See https://github.com/tzapu/WiFiManager/issues/1403
+bool setupWiFi() {
   WiFi.setHostname(hostname);
   WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE, INADDR_NONE);
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
 
-  while (WiFi.status() != WL_CONNECTED) {
+  for (int retries = 0; retries < maxRetryCount; retries++) {
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.println("Connected to WiFi");
+      Serial.println("IP address: " + WiFi.localIP().toString());
+      return true;
+    }
     delay(1000);
     Serial.println("Connecting to WiFi...");
-    retryCount++;
-    if (retryCount >= maxRetryCount) {
-      Serial.println("Failed to connect to WiFi. Restarting...");
-      ESP.restart();  // If maximum retry count is reached, restart the board
-    }
   }
-  retryCount = 0;  // Reset retry count on successful connection
-  Serial.println("Connected to WiFi");
-  Serial.println("IP address: " + WiFi.localIP().toString());
+
+  Serial.println("Failed to connect to WiFi. Continuing without WiFi.");
+  return false;
 }
 
 void setupTz() {
@@ -129,30 +120,9 @@ void setupTz() {
   preferences.end();
 }
 
-void setup() {
-  Serial.begin(115200);
-  Serial.println("Booting");
-
-  // Setup Wi-Fi connection
-  setupWiFi();
-
-  // Setup time zone variables
-  setupTz();
-
-  // Initialize the NTP client and sync with the NTP server
-  udp.begin(localPort);
-  Serial.print("NTP UDP Local port: ");
-  Serial.println(localPort);
-
-  Serial.println("waiting for sync");
-  setSyncProvider(getNtpMinute);
-  setSyncInterval(300);
-  while (timeStatus() == timeNotSet) {
-    delay(5000);
-  }
-
-  // Set up Arduino OTA
-
+// Start network-dependent services (OTA, mDNS). Called once WiFi is
+// available — either at boot or when the connection is first established.
+void startNetworkServices() {
   ArduinoOTA
     .onStart([]() {
       String type;
@@ -160,7 +130,6 @@ void setup() {
         type = "sketch";
       else // U_SPIFFS
         type = "filesystem";
-
       // NOTE: if updating SPIFFS this would be the place to unmount SPIFFS using SPIFFS.end()
       Serial.println("Start updating " + type);
     })
@@ -178,10 +147,53 @@ void setup() {
       else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
       else if (error == OTA_END_ERROR) Serial.println("End Failed");
     });
-
   ArduinoOTA.begin();
 
-  // Set up the web server
+  if (MDNS.begin(hostname)) {
+    Serial.println("mDNS responder started");
+  } else {
+    Serial.println("Error setting up mDNS responder!");
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  Serial.println("Booting");
+
+  // Attempt WiFi — the clock continues without it if unavailable
+  wifiAvailable = setupWiFi();
+
+  // Load timezone from non-volatile storage (works without WiFi)
+  setupTz();
+
+  // Register NTP sync provider. getNtpMinute() returns 0 if WiFi/NTP is
+  // unavailable, so TimeLib retries safely every 300 s.
+  udp.begin(localPort);
+  Serial.print("NTP UDP local port: ");
+  Serial.println(localPort);
+  setSyncProvider(getNtpMinute);
+  setSyncInterval(300);
+
+  if (wifiAvailable) {
+    // Wait up to 30 seconds for initial NTP sync
+    Serial.println("Waiting for NTP sync...");
+    unsigned long ntpDeadline = millis() + 30000;
+    while (timeStatus() == timeNotSet && millis() < ntpDeadline) {
+      delay(5000);
+    }
+    if (timeStatus() == timeNotSet) {
+      Serial.println("NTP sync timed out. Clock will sync when reachable.");
+    } else {
+      Serial.println("NTP sync successful.");
+    }
+
+    startNetworkServices();
+  } else {
+    Serial.println("No WiFi — skipping NTP sync, OTA and mDNS at boot.");
+    Serial.println("The clock will sync once WiFi becomes available.");
+  }
+
+  // Web server is always started; it becomes reachable once WiFi is up
   server.on("/", HTTP_GET, handleRoot);
   server.on("/submit", HTTP_POST, handleFormSubmit);
   server.on("/forward-5", HTTP_POST, handleFormForward5);
@@ -189,22 +201,17 @@ void setup() {
   server.on("/recycle", HTTP_POST, handleFormRecycle);
   server.on("/demo", HTTP_POST, handleFormDemo);
   server.on("/set-preferences", HTTP_POST, handleFormSetPreferences);
-
-  server.begin(); // Start the server
-
-  pinMode(led, OUTPUT);
+  server.begin();
 
   myStepper.setSpeed(maxSpeed);
 
   time_t currentTime = now();
-  // Convert the Unix time to local time
   tm localTime = *localtime(&currentTime);
-
   cMinute = pMinute = localTime.tm_min;
   cHour = pHour = localTime.tm_hour % 12;
 
   // Start up cycle
-  handleFormRecycle();
+  runRecycleCycle();
 }
 
 
@@ -215,10 +222,32 @@ void loop() {
   // Handle incoming client requests
   server.handleClient();
 
-  // Check Wi-Fi connection and reconnect if necessary
+  // WiFi watchdog: non-blocking reconnect with rate limiting.
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("Wi-Fi disconnected. Reconnecting...");
-    setupWiFi();
+    if (wifiAvailable) {
+      // Transition: was connected, just lost it
+      wifiAvailable = false;
+      Serial.println("Wi-Fi disconnected.");
+    }
+    unsigned long now_ms = millis();
+    if (now_ms - lastReconnectAttempt >= reconnectInterval) {
+      lastReconnectAttempt = now_ms;
+      Serial.println("Attempting WiFi reconnect...");
+      // Non-blocking: WiFi.begin() starts the association process in the
+      // background; status is checked on the next loop iteration.
+      WiFi.begin(ssid, password);
+    }
+  } else if (!wifiAvailable) {
+    // Transition: WiFi just became available (first connect or reconnect)
+    wifiAvailable = true;
+    Serial.println("WiFi (re)connected. IP: " + WiFi.localIP().toString());
+    startNetworkServices();
+    // Trigger an immediate NTP sync
+    time_t ntpTime = getNtpMinute();
+    if (ntpTime > 0) {
+      setTime(ntpTime);
+      Serial.println("NTP sync complete after reconnect.");
+    }
   }
 
   // Get the current time in seconds since January 1, 1970 (Unix time)
@@ -227,28 +256,22 @@ void loop() {
   // Convert the Unix time to local time
   tm localTime = *localtime(&currentTime);
 
-  long cStep = 0;     /* current motor step count */
-
   /* We go 1 rev = 2048 steps / hour */
   /* Every updateIntervalMinutes minutes, do a little move */
-  cMinute = localTime.tm_min;;
+  cMinute = localTime.tm_min;
 
-  if (cMinute != pMinute && cMinute >= (pMinute + updateIntervalMinutes) % 60) { /* time for update? - every updateIntervalMinutes minutes */
-    /*
-    Calculation for minute difference
-    * linear advance
-      pMinute = 1
-      cMinute = 5
-      diffMinute = (5 - 1 + 60) % 60 = 4
+  /*
+  Minute difference handles both linear advance and hour-boundary wrap:
+    linear:  pMinute=1,  cMinute=5  → diffMinute=(5-1+60)%60=4
+    wrap:    pMinute=59, cMinute=4  → diffMinute=(4-59+60)%60=5
+  Using diffMinute directly avoids the rollover false-negative in the old
+  condition (cMinute >= (pMinute + N) % 60) that broke near hour boundaries.
+  */
+  int diffMinute = ((int)cMinute - (int)pMinute + 60) % 60; /* minutes since last step */
 
-    * hour wrap
-      pMinute = 59
-      cMinute = 4
-      diffMinute = (4 - 59 + 60) % 60 = 5
-    */
-    int diffMinute = (cMinute - pMinute + 60) % 60; /* minutes since last step */
+  if (diffMinute >= (int)updateIntervalMinutes) { /* time for update? - every updateIntervalMinutes minutes */
     pMinute = cMinute;
-    cStep = (stepsPerRev * diffMinute) / 60;  /* desired motor position - 170 steps every 5 minutes */
+    long cStep = (stepsPerRev * diffMinute) / 60;  /* desired motor position - 170 steps every 5 minutes */
 
     // Debug prints
     Serial.print(diffMinute);
@@ -263,18 +286,18 @@ void loop() {
 
   // Handle hour offsets
   cHour = localTime.tm_hour % 12;
-  if (cHour != pHour && cHour >= ((pHour + 1) % 12)) {
+  int diffHour = ((int)cHour - (int)pHour + 12) % 12;
+  if (diffHour >= 1) {
     int stepsPerMinute = stepsPerRev / 60; // 1 rev = 60 minutes = 2048 steps => 34 (int) steps per minute instead of 34.133333
     int stepsPerHour = 60 * stepsPerMinute; // 34 * 60 = 2040 steps in 1 hour. => we are missing 8 steps every hour
 
     int missingSteps = stepsPerRev - stepsPerHour;  // 2048 - 2040 = 8
-    int diffHour = (cHour - pHour + 12) % 12;
-    Serial.print("Hour complete: ");
-    Serial.print(missingSteps*diffHour);
-    Serial.print("recovering missed steps");
+    Serial.print("Hour complete: recovering ");
+    Serial.print(missingSteps * diffHour);
+    Serial.print(" missed steps");
     Serial.println("");
     if (missingSteps > 0) {
-      myStepper.step(missingSteps);
+      myStepper.step(missingSteps * diffHour);
     }
     pHour = cHour;
   }
@@ -330,18 +353,18 @@ void handleRoot() {
   html += "<h3>Set the time you see on the clock now. Click submit to adjust the dial to current time automatically</h3>";
   html += "<form method='POST' action='/submit'>";
   html += "<label for='hour'>Hour (1-12):</label><input type='number' id='hour' name='hour' min='1' max='12' required><br>";
-  html += "<label for='minute61813414'>Minute (0-59):</label><input type='number' id='minute' name='minute' min='0' max='59' required><br>";
+  html += "<label for='minute'>Minute (0-59):</label><input type='number' id='minute' name='minute' min='0' max='59' required><br>";
   html += "<button type='submit'>Set Time</button></form>";
-  html += "<form method='POST' action='/forward-5'><button type='submit'>+5m</button></form></body></html>";
-  html += "<form method='POST' action='/backward-5'><button type='submit'>-5m</button></form></body></html>";
-  html += "<form method='POST' action='/recycle'><button type='submit'>Recycle</button></form></body></html>";
-  html += "<form method='POST' action='/demo'><button type='submit'>Demo</button></form></body></html>";
+  html += "<form method='POST' action='/forward-5'><button type='submit'>+5m</button></form>";
+  html += "<form method='POST' action='/backward-5'><button type='submit'>-5m</button></form>";
+  html += "<form method='POST' action='/recycle'><button type='submit'>Recycle</button></form>";
+  html += "<form method='POST' action='/demo'><button type='submit'>Demo</button></form>";
 
   html += "<h2>Preferences</h2>";
   html += "<form method='POST' action='/set-preferences'>";
-  html += "<label for='TZ hour offset'>TZ hour offset:</label><input type='number' id='hour_offset' name='hour_offset' min='-14' max='12' value='" + String(timeZoneOffsetHours) + "' required><br>";
-  html += "<label for='TZ minute offset'>TZ minute offset:</label><input type='number' id='minute_offset' name='minute_offset' min='0' max='59' value='" + String(timeZoneOffsetMins) + "' required><br>";
-  html += "<label for='DST'>Daylight Savings Time currently in effect?</label><input type='checkbox' id='dst' name='dst'" + String( isDst ? "checked" : "") + "><br>";
+  html += "<label for='hour_offset'>TZ hour offset:</label><input type='number' id='hour_offset' name='hour_offset' min='-14' max='12' value='" + String(timeZoneOffsetHours) + "' required><br>";
+  html += "<label for='minute_offset'>TZ minute offset:</label><input type='number' id='minute_offset' name='minute_offset' min='0' max='59' value='" + String(timeZoneOffsetMins) + "' required><br>";
+  html += "<label for='dst'>Daylight Savings Time currently in effect?</label><input type='checkbox' id='dst' name='dst'" + String(isDst ? " checked" : "") + "><br>";
   html += "<button type='submit'>Save preferences</button></form>";
 
   html += "<h2>Debug Info</h2>";
@@ -350,44 +373,37 @@ void handleRoot() {
   html += "<br/><div>timeZoneOffsetHours : timeZoneOffsetMins = " + String(timeZoneOffsetHours) + ":" + (timeZoneOffsetMins < 10 ? "0" : "") + String(timeZoneOffsetMins) + "</div>";
   html += "<br/><div>isDst = " + String(isDst ? "true" : "false") + "</div>";
   html += "<br/><div>hostname = " + String(hostname) + "</div>";
+  html += "</div>";
 
   server.send(200, "text/html", html);
 }
 
-void handleFormForward5() {
+// Motor-only helper: full CCW then CW rotation to reset needle position.
+// Safe to call from setup() and from HTTP handlers alike.
+void runRecycleCycle() {
   Serial.println("full rotation counterclockwise");
   myStepper.step(-stepsPerRev);
 
   Serial.println("full rotation clockwise");
   myStepper.step(stepsPerRev);
+}
 
+void handleFormForward5() {
+  runRecycleCycle();
   Serial.println("Jump 5m");
   myStepper.step((stepsPerRev * 5) / 60);
-
   server.send(200, "text/plain", "Moved 5 minutes Forward");
 }
 
 void handleFormBackward5() {
-  Serial.println("full rotation counterclockwise");
-  myStepper.step(-stepsPerRev);
-
-  Serial.println("full rotation clockwise");
-  myStepper.step(stepsPerRev);
-
-  Serial.println("Jump 5m");
+  runRecycleCycle();
+  Serial.println("Jump -5m");
   myStepper.step(-1 * (stepsPerRev * 5) / 60);
-
-
   server.send(200, "text/plain", "Moved 5 minutes Backward");
 }
 
 void handleFormRecycle() {
-  Serial.println("full rotation counterclockwise");
-  myStepper.step(-stepsPerRev);
-
-  Serial.println("full rotation clockwise");
-  myStepper.step(stepsPerRev);
-
+  runRecycleCycle();
   server.send(200, "text/plain", "Cycle complete");
 }
 
@@ -409,29 +425,31 @@ void handleDialAdjustments(int iHour, int iMinute) {
   cHour = pHour = localTime.tm_hour % 12;
 
   // Print the local time to the serial monitor
-  Serial.print("Current time (PST): ");
+  Serial.print("Current time: ");
   Serial.print(cHour);
   Serial.print(":");
   Serial.println(localTime.tm_min);
 
   // Parse the input time in hours and minutes
-  Serial.print("Input time (PST): ");
+  Serial.print("Input time: ");
   Serial.print(iHour);
   Serial.print(":");
   Serial.println(iMinute);
 
+  // Normalize input hour to 0-11 range (form sends 1-12; 12 maps to 0)
+  int normalizedInputHour = iHour % 12;
 
-  // Calculate the time difference in minutes
-  int hourMinDiff = (cHour - iHour) * 60;
-  Serial.print("Time difference in minutes from hour: ");
-  Serial.println(hourMinDiff);
-  int minuteDiff = cMinute - iMinute;
-  Serial.print("Time difference from minutes: ");
-  Serial.println(minuteDiff);
+  // Compute total minutes within a 12-hour window (0-719) for each time
+  int actualTotal = cHour * 60 + (int)cMinute;
+  int inputTotal  = normalizedInputHour * 60 + iMinute;
 
-  int minuteDifference = hourMinDiff + minuteDiff;
+  // Difference: positive = clock is behind actual (advance motor)
+  //             negative = clock is ahead of actual (rewind motor)
+  // Normalize to the shortest path within ±360 minutes (half of 720).
+  int minuteDifference = actualTotal - inputTotal;
+  if (minuteDifference >  360) minuteDifference -= 720;
+  if (minuteDifference < -360) minuteDifference += 720;
 
-  // Print the time difference in seconds
   Serial.print("Time difference: ");
   Serial.print(minuteDifference);
   Serial.println(" minutes");
@@ -464,11 +482,18 @@ void handleFormSetPreferences() {
       preferences.putBool(attrib_isdst, tmp_dst);
       preferences.end();
 
-      // reread and sync the global variables with the preferences values
+      // Reread and sync the global variables with the preferences values
       setupTz();
 
-      // force a time sync now
-      setTime(getNtpMinute());
+      // Force an immediate NTP resync to apply the new timezone offset.
+      // Skipped if WiFi is unavailable — TimeLib will sync at the next
+      // scheduled interval once the network is reachable.
+      if (wifiAvailable) {
+        time_t ntpTime = getNtpMinute();
+        if (ntpTime > 0) {
+          setTime(ntpTime);
+        }
+      }
 
       // Return a success message to the client
       server.send(200, "text/plain", "Preferences set successfully");
