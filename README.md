@@ -36,6 +36,7 @@ This build replaces the original quartz clock movement with an ESP32-driven step
 - **Timezone and DST support** — saved to non-volatile storage and persists across power cycles
 - **OTA firmware updates** — upload new firmware wirelessly via Arduino IDE
 - **Resilient to network outages** — continues running if WiFi or NTP is unavailable, reconnects automatically
+- **Home Assistant integration** — MQTT auto-discovery exposes clock sensors and control buttons directly in HA
 
 ---
 
@@ -86,10 +87,17 @@ The ULN2003 board powers the stepper motor — connect its 5-12V input to your 5
    https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
    ```
 3. Install the **Time** library by Paul Stoffregen via **Library Manager**
-4. Create a `secrets.h` file in the project directory:
+4. Install the **PubSubClient** library by Nick O'Leary via **Library Manager** (MQTT client)
+5. Create a `secrets.h` file in the project directory:
    ```cpp
    #define SECRET_SSID "your_wifi_network_name"
    #define SECRET_PASSWORD "your_wifi_password"
+
+   // MQTT broker (required for Home Assistant integration)
+   #define MQTT_SERVER "192.168.1.x"  // your broker IP or hostname
+   #define MQTT_PORT   1883
+   #define MQTT_USER   "your_mqtt_user"
+   #define MQTT_PASSWORD "your_mqtt_password"
    ```
    This file is gitignored and must be created locally.
 
@@ -104,7 +112,7 @@ Or via command line:
 
 ```bash
 arduino-cli compile --fqbn esp32:esp32:esp32 wandering-hour-clock/
-arduino-cli upload --fqbn esp32:esp32:esp32 --port /dev/ttyUSB0 wandering-hour-clock/
+arduino-cli upload --fqbn esp32:esp32:esp32 --port /dev/cu.usbserial-0001 wandering-hour-clock/
 ```
 
 ### OTA (Over-the-Air) Updates
@@ -153,6 +161,55 @@ The **Debug Info** section at the bottom shows internal state (`cHour:cMinute` a
 **Example:** Newfoundland (UTC-3:30) during summer — hour offset: `-3`, minute offset: `30`, DST: checked.
 
 Preferences are stored in non-volatile memory and persist across power cycles. After changing the timezone, use **Set Time** to resynchronize the dial.
+
+---
+
+## Home Assistant Integration
+
+The firmware uses MQTT with [Home Assistant auto-discovery](https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery). Once the clock connects to your MQTT broker, it automatically registers itself as a device in HA — no manual YAML configuration needed.
+
+### Prerequisites
+
+- A running MQTT broker (e.g. [Mosquitto](https://mosquitto.org/)) reachable from the ESP32
+- The MQTT integration enabled in Home Assistant
+- MQTT credentials set in `secrets.h` (see Software Setup above)
+
+### Entities Created
+
+| Entity | Type | Description |
+|---|---|---|
+| Clock Time | Sensor | Current time displayed on the clock face (e.g. `3:45`) |
+| WiFi Signal | Sensor | ESP32 RSSI in dBm |
+| Forward 5m | Button | Advance the dial by 5 minutes |
+| Backward 5m | Button | Rewind the dial by 5 minutes |
+| Recycle | Button | Full CCW then CW rotation (motor reset) |
+| Demo | Button | Advance through 12 full hours |
+
+### MQTT Topics
+
+| Topic | Direction | Description |
+|---|---|---|
+| `wandering-hour-clock/command` | HA → clock | Send a command (see below) |
+| `wandering-hour-clock/state` | clock → HA | JSON state payload, published every 60s and after every command |
+| `wandering-hour-clock/availability` | clock → HA | `online` / `offline` (LWT) |
+
+### State Payload
+
+```json
+{"time":"3:45","hour":3,"minute":45,"rssi":-62,"ip":"192.168.1.42"}
+```
+
+### Commands
+
+Publish any of the following to `wandering-hour-clock/command`:
+
+| Payload | Effect |
+|---|---|
+| `forward-5` | Advance dial 5 minutes |
+| `backward-5` | Rewind dial 5 minutes |
+| `recycle` | Run recycle cycle |
+| `demo` | Run 12-hour demo |
+| `set:H:MM` | Adjust dial to a specific time (e.g. `set:3:45`) |
 
 ---
 

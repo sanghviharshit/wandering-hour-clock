@@ -196,7 +196,7 @@ ArduinoOTA is configured and active. To update firmware wirelessly:
 ### Command-line (arduino-cli)
 ```bash
 arduino-cli compile --fqbn esp32:esp32:esp32 wandering-hour-clock/
-arduino-cli upload --fqbn esp32:esp32:esp32 --port /dev/ttyUSB0 wandering-hour-clock/
+arduino-cli upload --fqbn esp32:esp32:esp32 --port /dev/cu.usbserial-0001 wandering-hour-clock/
 ```
 
 ### Serial Monitor

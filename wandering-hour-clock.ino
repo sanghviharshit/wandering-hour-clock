@@ -20,6 +20,7 @@
 #include <Preferences.h>
 
 #include <Stepper.h>
+#include <PubSubClient.h>
 
 #include "secrets.h"
 
@@ -67,6 +68,20 @@ const int maxRetryCount = 10;   // WiFi connection attempts before giving up
 bool wifiAvailable = false;
 unsigned long lastReconnectAttempt = 0;
 const unsigned long reconnectInterval = 30000; // ms between reconnect attempts in loop()
+
+// MQTT
+WiFiClient espClient;
+PubSubClient mqttClient(espClient);
+unsigned long lastMqttReconnect = 0;
+const unsigned long mqttReconnectInterval = 10000; // ms between MQTT reconnect attempts
+unsigned long lastMqttPublish = 0;
+const unsigned long mqttPublishInterval = 60000; // publish state every 60s
+bool mqttDiscoverySent = false;
+
+const char* mqttTopicPrefix = "wandering-hour-clock";
+const char* mqttCommandTopic = "wandering-hour-clock/command";
+const char* mqttStateTopic = "wandering-hour-clock/state";
+const char* mqttAvailTopic = "wandering-hour-clock/availability";
 
 // Define the NTP server and timezone offset
 static const char ntpServerName[] = "us.pool.ntp.org";
@@ -156,6 +171,164 @@ void startNetworkServices() {
   }
 }
 
+// Publish HA MQTT auto-discovery messages so the clock appears as a device
+void mqttSendDiscovery() {
+  String deviceBlock =
+    "\"dev\":{\"ids\":[\"whc01\"],\"name\":\"Wandering Hour Clock\","
+    "\"mf\":\"DIY\",\"mdl\":\"ESP32 WHC\",\"sw\":\"1.0\"}";
+
+  // Sensor: current time display
+  String sensorConfig = String("{") +
+    "\"name\":\"Clock Time\"," +
+    "\"stat_t\":\"" + mqttStateTopic + "\"," +
+    "\"val_tpl\":\"{{ value_json.time }}\"," +
+    "\"icon\":\"mdi:clock-outline\"," +
+    "\"uniq_id\":\"whc01_time\"," +
+    "\"avty_t\":\"" + mqttAvailTopic + "\"," +
+    deviceBlock +
+    "}";
+  mqttClient.publish("homeassistant/sensor/whc01/time/config", sensorConfig.c_str(), true);
+
+  // Sensor: WiFi RSSI
+  String rssiConfig = String("{") +
+    "\"name\":\"WiFi Signal\"," +
+    "\"stat_t\":\"" + mqttStateTopic + "\"," +
+    "\"val_tpl\":\"{{ value_json.rssi }}\"," +
+    "\"unit_of_meas\":\"dBm\"," +
+    "\"icon\":\"mdi:wifi\"," +
+    "\"uniq_id\":\"whc01_rssi\"," +
+    "\"avty_t\":\"" + mqttAvailTopic + "\"," +
+    deviceBlock +
+    "}";
+  mqttClient.publish("homeassistant/sensor/whc01/rssi/config", rssiConfig.c_str(), true);
+
+  // Button: Forward 5 min
+  String fwd5Config = String("{") +
+    "\"name\":\"Forward 5m\"," +
+    "\"cmd_t\":\"" + mqttCommandTopic + "\"," +
+    "\"pl_prs\":\"forward-5\"," +
+    "\"icon\":\"mdi:fast-forward\"," +
+    "\"uniq_id\":\"whc01_fwd5\"," +
+    "\"avty_t\":\"" + mqttAvailTopic + "\"," +
+    deviceBlock +
+    "}";
+  mqttClient.publish("homeassistant/button/whc01/fwd5/config", fwd5Config.c_str(), true);
+
+  // Button: Backward 5 min
+  String bwd5Config = String("{") +
+    "\"name\":\"Backward 5m\"," +
+    "\"cmd_t\":\"" + mqttCommandTopic + "\"," +
+    "\"pl_prs\":\"backward-5\"," +
+    "\"icon\":\"mdi:rewind\"," +
+    "\"uniq_id\":\"whc01_bwd5\"," +
+    "\"avty_t\":\"" + mqttAvailTopic + "\"," +
+    deviceBlock +
+    "}";
+  mqttClient.publish("homeassistant/button/whc01/bwd5/config", bwd5Config.c_str(), true);
+
+  // Button: Recycle
+  String recycleConfig = String("{") +
+    "\"name\":\"Recycle\"," +
+    "\"cmd_t\":\"" + mqttCommandTopic + "\"," +
+    "\"pl_prs\":\"recycle\"," +
+    "\"icon\":\"mdi:sync\"," +
+    "\"uniq_id\":\"whc01_recycle\"," +
+    "\"avty_t\":\"" + mqttAvailTopic + "\"," +
+    deviceBlock +
+    "}";
+  mqttClient.publish("homeassistant/button/whc01/recycle/config", recycleConfig.c_str(), true);
+
+  // Button: Demo
+  String demoConfig = String("{") +
+    "\"name\":\"Demo\"," +
+    "\"cmd_t\":\"" + mqttCommandTopic + "\"," +
+    "\"pl_prs\":\"demo\"," +
+    "\"icon\":\"mdi:play-circle\"," +
+    "\"uniq_id\":\"whc01_demo\"," +
+    "\"avty_t\":\"" + mqttAvailTopic + "\"," +
+    deviceBlock +
+    "}";
+  mqttClient.publish("homeassistant/button/whc01/demo/config", demoConfig.c_str(), true);
+
+  Serial.println("MQTT discovery messages sent");
+}
+
+void mqttPublishState() {
+  time_t currentTime = now();
+  tm localTime = *localtime(&currentTime);
+  int h = localTime.tm_hour % 12;
+  if (h == 0) h = 12;
+  int m = localTime.tm_min;
+
+  String state = String("{") +
+    "\"time\":\"" + String(h) + ":" + (m < 10 ? "0" : "") + String(m) + "\"," +
+    "\"hour\":" + String(h) + "," +
+    "\"minute\":" + String(m) + "," +
+    "\"rssi\":" + String(WiFi.RSSI()) + "," +
+    "\"ip\":\"" + WiFi.localIP().toString() + "\"" +
+    "}";
+  mqttClient.publish(mqttStateTopic, state.c_str());
+}
+
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  String message;
+  for (unsigned int i = 0; i < length; i++) {
+    message += (char)payload[i];
+  }
+  Serial.print("MQTT command: ");
+  Serial.println(message);
+
+  if (message == "forward-5") {
+    runRecycleCycle();
+    Serial.println("MQTT: Jump 5m");
+    myStepper.step((stepsPerRev * 5) / 60);
+  } else if (message == "backward-5") {
+    runRecycleCycle();
+    Serial.println("MQTT: Jump -5m");
+    myStepper.step(-1 * (stepsPerRev * 5) / 60);
+  } else if (message == "recycle") {
+    Serial.println("MQTT: Recycle");
+    runRecycleCycle();
+  } else if (message == "demo") {
+    Serial.println("MQTT: Demo");
+    myStepper.step(stepsPerRev * 12);
+  } else if (message.startsWith("set:")) {
+    // Format: "set:HH:MM" e.g. "set:3:45"
+    int colonPos = message.indexOf(':', 4);
+    if (colonPos > 4) {
+      int h = message.substring(4, colonPos).toInt();
+      int m = message.substring(colonPos + 1).toInt();
+      if (h >= 1 && h <= 12 && m >= 0 && m <= 59) {
+        Serial.print("MQTT: Set time ");
+        Serial.print(h); Serial.print(":"); Serial.println(m);
+        handleDialAdjustments(h, m);
+      }
+    }
+  }
+
+  // Publish updated state after any command
+  mqttPublishState();
+}
+
+bool mqttConnect() {
+  Serial.print("Connecting to MQTT...");
+  if (mqttClient.connect(hostname, MQTT_USER, MQTT_PASSWORD,
+                          mqttAvailTopic, 0, true, "offline")) {
+    Serial.println("connected");
+    mqttClient.publish(mqttAvailTopic, "online", true);
+    mqttClient.subscribe(mqttCommandTopic);
+    if (!mqttDiscoverySent) {
+      mqttSendDiscovery();
+      mqttDiscoverySent = true;
+    }
+    mqttPublishState();
+    return true;
+  }
+  Serial.print("failed, rc=");
+  Serial.println(mqttClient.state());
+  return false;
+}
+
 void setup() {
   Serial.begin(115200);
   Serial.println("Booting");
@@ -191,6 +364,13 @@ void setup() {
   } else {
     Serial.println("No WiFi — skipping NTP sync, OTA and mDNS at boot.");
     Serial.println("The clock will sync once WiFi becomes available.");
+  }
+
+  // MQTT setup
+  mqttClient.setServer(MQTT_SERVER, MQTT_PORT);
+  mqttClient.setCallback(mqttCallback);
+  if (wifiAvailable) {
+    mqttConnect();
   }
 
   // Web server is always started; it becomes reachable once WiFi is up
@@ -247,6 +427,25 @@ void loop() {
     if (ntpTime > 0) {
       setTime(ntpTime);
       Serial.println("NTP sync complete after reconnect.");
+    }
+  }
+
+  // MQTT loop: maintain connection and process incoming messages
+  if (wifiAvailable) {
+    if (!mqttClient.connected()) {
+      unsigned long now_ms2 = millis();
+      if (now_ms2 - lastMqttReconnect >= mqttReconnectInterval) {
+        lastMqttReconnect = now_ms2;
+        mqttConnect();
+      }
+    } else {
+      mqttClient.loop();
+      // Periodic state publish
+      unsigned long now_ms2 = millis();
+      if (now_ms2 - lastMqttPublish >= mqttPublishInterval) {
+        lastMqttPublish = now_ms2;
+        mqttPublishState();
+      }
     }
   }
 
